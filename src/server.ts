@@ -8,7 +8,7 @@ const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, () => {
   console.log(`🚀 SpoilerShield API server running on port ${PORT}`);
   console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`📋 Health check: http://localhost:${PORT}/health`);
+  console.log(`📋 Health check: /health`);
 });
 
 // Graceful shutdown

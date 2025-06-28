@@ -13,16 +13,15 @@ import { questionsRouter } from './routes/questions.route';
 import { titlesRouter } from './routes/titles.route';
 
 // Load environment variables
-
-
 const app = express();
+const isProd = process.env.NODE_ENV === 'production';
 
 // Security middleware
 app.use(helmet());
 
 // CORS configuration
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:8081',
+  origin: isProd ? '*' : (process.env.FRONTEND_URL || 'http://localhost:8081'),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization']
