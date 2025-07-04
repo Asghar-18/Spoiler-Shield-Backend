@@ -2,20 +2,18 @@ import { OpenAI } from "openai";
 import { supabase } from "../lib/supabase";
 import { questionsService } from "./questions.service";
 import { chaptersService } from "./chapters.service";
+import { getEmbedding, cosineSimilarity } from "../utils/embedding.util";
 
 const openai = new OpenAI({
   apiKey: process.env.GROQ_API_KEY!,
-  baseURL: "https://api.groq.com/openai/v1", // <- use Groq's base
+  baseURL: "https://api.groq.com/openai/v1",
 });
 
 export const aiService = {
   generateAnswer: async (questionId: string) => {
     try {
-      // 1. Fetch question with better error handling
       console.log("🔍 Fetching question:", questionId);
-      const questionResponse = await questionsService.getQuestionById(
-        questionId
-      );
+      const questionResponse = await questionsService.getQuestionById(questionId);
 
       if (!questionResponse.success || !questionResponse.data) {
         console.error("❌ Question fetch failed:", questionResponse.error);
@@ -29,48 +27,98 @@ export const aiService = {
         question_text,
       });
 
-      // 2. Fetch chapters with proper error handling
-      console.log("📚 Fetching chapters for title:", title_id);
-      const chaptersResponse = await chaptersService.getChaptersByTitle(
-        title_id
-      );
+      console.log("📚 Fetching chapter embeddings for title:", title_id);
 
-      console.log("📊 Chapters response:", {
-        success: chaptersResponse.success,
-        dataLength: chaptersResponse.data?.length || 0,
-        error: chaptersResponse.error,
+      // Fetch chapter embeddings
+      const { data: embeddingsData, error: embeddingsError } = await supabase
+        .from("chapter_embeddings")
+        .select(`
+          embedding,
+          chapters!inner(
+            id,
+            name,
+            order,
+            content,
+            title_id
+          )
+        `)
+        .eq("chapters.title_id", title_id);
+
+      if (embeddingsError || !embeddingsData || embeddingsData.length === 0) {
+        console.error("❌ Chapter embeddings fetch failed:", embeddingsError);
+        throw new Error(`Failed to fetch chapter embeddings: ${embeddingsError?.message}`);
+      }
+
+      // Debug: Log the actual structure
+      console.log("🔍 DEBUG: First item structure:", JSON.stringify(embeddingsData[0], null, 2));
+
+      const chaptersWithEmbeddings: Array<{
+        chapter: any;
+        embedding: number[];
+      }> = [];
+
+      embeddingsData.forEach((item: any) => {
+        let parsedEmbedding: number[];
+
+        try {
+          parsedEmbedding =
+            typeof item.embedding === "string"
+              ? JSON.parse(item.embedding)
+              : item.embedding;
+        } catch (err) {
+          console.error("❌ Failed to parse embedding:", item.embedding);
+          throw new Error("Invalid embedding format in DB");
+        }
+
+        const chapter = Array.isArray(item.chapters) ? item.chapters[0] : item.chapters;
+
+        if (chapter?.order <= (chapter_limit || Infinity)) {
+          chaptersWithEmbeddings.push({
+            chapter,
+            embedding: parsedEmbedding,
+          });
+        }
       });
 
-      if (!chaptersResponse.success || !chaptersResponse.data) {
-        console.error("❌ Chapters fetch failed:", chaptersResponse.error);
-        throw new Error(`Failed to fetch chapters: ${chaptersResponse.error}`);
+      if (chaptersWithEmbeddings.length === 0) {
+        throw new Error(`No chapters available within chapter limit: ${chapter_limit}`);
       }
 
-      if (chaptersResponse.data.length === 0) {
-        console.warn("⚠️ No chapters found for title:", title_id);
-        throw new Error(`No chapters found for title: ${title_id}`);
+      console.log(`📚 Found ${chaptersWithEmbeddings.length} chapters within limit`);
+
+      console.log("📐 Getting embedding for question...");
+      if (!question_text) {
+        throw new Error("Question text is null or empty");
       }
 
-      // 3. Filter chapters based on chapter_limit
-      let relevantChapters = chaptersResponse.data;
-      if (chapter_limit && chapter_limit > 0) {
-        relevantChapters = chaptersResponse.data.filter(
-          (chapter) => (chapter.order || 0) <= chapter_limit
-        );
-        console.log(
-          `📖 Filtered to ${relevantChapters.length} chapters (limit: ${chapter_limit})`
-        );
-      }
+      const questionEmbedding = await getEmbedding(question_text);
+
+      const chaptersWithScores = chaptersWithEmbeddings.map((item) => {
+        return {
+          id: item.chapter.id,
+          name: item.chapter.name,
+          order: item.chapter.order,
+          content: item.chapter.content,
+          title_id: item.chapter.title_id,
+          similarity: cosineSimilarity(questionEmbedding, item.embedding),
+        };
+      });
+
+      const relevantChapters = chaptersWithScores
+        .sort((a, b) => b.similarity - a.similarity)
+        .slice(0, 5);
 
       if (relevantChapters.length === 0) {
-        throw new Error(
-          `No chapters available within the specified limit: ${chapter_limit}`
-        );
+        throw new Error("No relevant chapters found based on semantic similarity.");
       }
 
-      // 4. Build context text
+      console.log("🧠 Top relevant chapters:");
+      relevantChapters.forEach((c) =>
+        console.log(`- ${c.name} (order: ${c.order}, similarity: ${c.similarity.toFixed(3)})`)
+      );
+
       const contextText = relevantChapters
-        .sort((a, b) => (a.order || 0) - (b.order || 0)) // Ensure proper ordering
+        .sort((a, b) => a.order - b.order)
         .map((chapter) => {
           const chapterName = chapter.name || `Chapter ${chapter.order}`;
           const chapterContent = chapter.content || "";
@@ -78,73 +126,51 @@ export const aiService = {
         })
         .join("\n\n");
 
-      console.log(`📝 Context built with ${contextText.length} characters`);
+      console.log(`📝 Context built with ${contextText.length} characters from ${relevantChapters.length} chapters`);
 
-      // 5. Build prompt
       const prompt = `
-You are a helpful assistant. Answer the question below based ONLY on the content from the chapters provided.
+You are a helpful assistant. Use ONLY the information provided in the chapters below to answer the question. DO NOT use prior knowledge or guess. If the answer isn't found in the content, reply: "I could not find the answer in the provided chapters."
 
-### Available Chapters:
+### Available Chapters (selected based on relevance):
 ${contextText}
 
 ### Question:
 ${question_text}
 
-### Instructions:
-- Only answer based on the provided chapters
-- If the question cannot be answered from the given chapters, say so
-- Avoid spoilers from content beyond chapter ${chapter_limit || "limit"}
-- Be concise but thorough in your response
+### Notes:
+- Avoid spoilers from content beyond Chapter ${chapter_limit || "limit"}
+- Stay factual and concise.
+- Do NOT fabricate or assume details not present in the text.
 `;
 
-      // 6. Update question status to processing
       await questionsService.updateQuestionStatus(questionId, "pending");
 
-      // 7. Call OpenAI API
-      console.log("🤖 Calling OpenAI API...");
+      console.log("🤖 Calling Groq API...");
       const response = await openai.chat.completions.create({
-        model: "meta-llama/llama-4-scout-17b-16e-instruct", // 👈 Replace with Groq model
+        model: "meta-llama/llama-4-scout-17b-16e-instruct",
         messages: [{ role: "user", content: prompt }],
-        temperature: 0.7,
+        temperature: 0.3,
         max_tokens: 1000,
       });
 
       const answer = response.choices[0]?.message?.content;
-
       if (!answer) {
-        throw new Error("No response received from OpenAI");
+        throw new Error("No answer generated by AI");
       }
 
-      console.log("✅ AI response received");
+      console.log("✅ Answer generated successfully");
 
-      // 8. Save answer using the service method
-      const updateResponse = await questionsService.updateQuestionAnswer(
-        questionId,
-        answer
-      );
+      await questionsService.updateQuestionAnswer(questionId, answer);
+      await questionsService.updateQuestionStatus(questionId, "answered");
 
-      if (!updateResponse.success) {
-        console.error("❌ Failed to save answer:", updateResponse.error);
-        throw new Error(`Failed to save answer: ${updateResponse.error}`);
-      }
-
-      console.log("✅ Answer saved successfully");
       return answer;
     } catch (error) {
-      console.error("❌ AI Service Error:", error);
-
-      // Update question status to failed
-      try {
-        await questionsService.updateQuestionStatus(questionId, "failed");
-      } catch (statusError) {
-        console.error("❌ Failed to update question status:", statusError);
-      }
-
+      console.error("❌ AI service error:", error);
+      await questionsService.updateQuestionStatus(questionId, "failed");
       throw error;
     }
   },
 
-  // Additional helper method for testing chapter retrieval
   testChapterRetrieval: async (titleId: string) => {
     try {
       console.log("🧪 Testing chapter retrieval for title:", titleId);
