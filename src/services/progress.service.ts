@@ -70,7 +70,7 @@ export const progressService = {
         .from('user_progress')
         .select(`
           *,
-          titles(id, name, coverImage, author, description)
+          titles(id, name, coverImage)
         `)
         .eq('user_id', userId)
         .order('updated_at', { ascending: false });
