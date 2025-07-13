@@ -106,7 +106,7 @@ export const aiService = {
 
       const relevantChapters = chaptersWithScores
         .sort((a, b) => b.similarity - a.similarity)
-        .slice(0, 5);
+        .slice(0, 10);
 
       if (relevantChapters.length === 0) {
         throw new Error("No relevant chapters found based on semantic similarity.");
